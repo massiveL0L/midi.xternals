@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Midichip - midi.xternals</title>
+<style>
+body {
+  background: linear-gradient(135deg, #1f1f2f, #2e2e4f);
+  font-family: 'Roboto', sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  margin: 0;
+  overflow: hidden;
+  transition: background 0.3s ease;
+}
+.container {
+  background: rgba(30,30,50,0.95);
+  padding: 2rem;
+  border-radius: 20px;
+  width: 100%;
+  max-width: 500px;
+  text-align: center;
+  box-shadow: 0 0 40px rgba(240,165,0,0.2);
+  transition: box-shadow 0.3s ease;
+}
+h2 { color: #f0a500; margin-bottom: 1rem; }
+label { display: block; margin:0.6rem 0 0.2rem; font-weight:700; text-align:left; }
+select,input[type="range"],button {
+  width:100%;
+  padding:0.5rem;
+  margin-bottom:0.7rem;
+  border-radius:8px;
+  border:none;
+  font-size:0.9rem;
+  background:#3e3e6f;
+  color:#fff;
+  transition:0.2s;
+}
+button {
+  background:#f0a500;
+  color:#1e1e2f;
+  font-weight:bold;
+  cursor:pointer;
+  transition:0.3s;
+}
+button:hover { background:#ffaa00; }
+#status { color:#bbb; font-size:0.85rem; margin-top:0.8rem; }
+#visualizer {
+  margin-top:1rem;
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:6px;
+}
+.note-circle {
+  width:16px;
+  height:16px;
+  border-radius:50%;
+  background:#f0a500;
+  opacity:0;
+  transform:scale(0);
+  box-shadow: 0 0 0 rgba(240,165,0,0.4);
+  transition:opacity 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+.note-circle.active {
+  opacity:1;
+  transform:scale(1.6);
+  box-shadow: 0 0 20px 4px rgba(240,165,0,0.7);
+  animation: pulse 0.4s ease infinite alternate;
+}
+@keyframes pulse {
+  0% { transform: scale(1.5); box-shadow:0 0 20px 4px rgba(240,165,0,0.7);}
+  100% { transform: scale(1.8); box-shadow:0 0 30px 8px rgba(240,200,0,0.9);}
+}
+</style>
+</head>
+<body>
+
+<div class="container" id="container">
+<h2>Midichip - Midinous </h2>
+
+<label>Waveform</label>
+<select id="waveform">
+<option value="sine">Sine</option>
+<option value="square">Square</option>
+<option value="sawtooth">Sawtooth</option>
+<option value="triangle">Triangle</option>
+</select>
+
+<label>Volume</label>
+<input type="range" id="volume" min="0" max="1" step="0.01" value="0.3">
+
+<label>Attack (ms)</label>
+<input type="range" id="attack" min="0" max="500" value="10">
+
+<label>Release (ms)</label>
+<input type="range" id="release" min="0" max="1000" value="100">
+
+<button id="reloadBtn">Reload MIDI Inputs</button>
+
+<p id="status">Initializing…</p>
+<div id="visualizer"></div>
+</div>
+
+<script>
+let audioCtx;
+let midiAccess;
+const activeNotes = new Map();
+const waveform = document.getElementById("waveform");
+const volume = document.getElementById("volume");
+const attack = document.getElementById("attack");
+const release = document.getElementById("release");
+const status = document.getElementById("status");
+const container = document.getElementById("container");
+const visualizer = document.getElementById("visualizer");
+const reloadBtn = document.getElementById("reloadBtn");
+const midinousInputs = new Set();
+
+// --- Auto initialize ---
+window.addEventListener('load', async () => {
+  audioCtx = new AudioContext();
+  await audioCtx.resume();
+  await initMIDI();
+});
+
+async function initMIDI(){
+  try {
+    midiAccess = await navigator.requestMIDIAccess({ sysex:false });
+    midiAccess.inputs.forEach(input => registerInput(input));
+    midiAccess.onstatechange = (e) => {
+      if(e.port.type==='input'){
+        if(e.port.state==='connected') registerInput(e.port);
+        if(e.port.state==='disconnected') midinousInputs.delete(e.port);
+        updateStatus();
+      }
+    };
+    updateStatus();
+  } catch(err){
+    status.textContent = "MIDI access not supported.";
+  }
+}
+
+// --- Register Midinous input ---
+function registerInput(input){
+  if(input.name.toLowerCase().includes("midinous")){
+    if(!midinousInputs.has(input)){
+      midinousInputs.add(input);
+      input.onmidimessage = onMIDI;
+      updateStatus();
+    }
+  }
+}
+
+// --- Reload MIDI Inputs ---
+reloadBtn.onclick = async () => {
+  midinousInputs.clear();
+  midiAccess.inputs.forEach(input => registerInput(input));
+  updateStatus();
+  status.textContent = "reloaded";
+};
+
+// --- Update Status ---
+function updateStatus(){
+  status.textContent = midinousInputs.size===0 ? "No Midinous MIDI controllers found." : `Listening to ${midinousInputs.size} Midinous controller(s).`;
+}
+
+// --- Visualizer ---
+function createNoteCircle(note){
+  let circle = document.createElement("div");
+  circle.classList.add("note-circle");
+  circle.dataset.note = note;
+  visualizer.appendChild(circle);
+  return circle;
+}
+
+// --- MIDI handling ---
+function onMIDI(e){
+  const [statusByte,note,velocity] = e.data;
+  const cmd = statusByte & 0xf0;
+  if(cmd===0x90 && velocity>0) noteOn(note,velocity);
+  if(cmd===0x80 || (cmd===0x90 && velocity===0)) noteOff(note);
+}
+
+// --- Beep synth ---
+function noteOn(note,velocity){
+  if(activeNotes.has(note)) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.value = 440*Math.pow(2,(note-69)/12);
+  osc.type = waveform.value;
+  const now = audioCtx.currentTime;
+  gain.gain.setValueAtTime(0,now);
+  gain.gain.linearRampToValueAtTime(volume.value*(velocity/127), now+attack.value/1000);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start();
+  let circle = visualizer.querySelector(`[data-note="${note}"]`) || createNoteCircle(note);
+  circle.classList.add("active");
+  updateBackground();
+  activeNotes.set(note,{osc,gain,circle});
+}
+
+function noteOff(note){
+  const node = activeNotes.get(note);
+  if(!node) return;
+  const now = audioCtx.currentTime;
+  node.gain.gain.linearRampToValueAtTime(0,now+release.value/1000);
+  node.osc.stop(now+release.value/1000);
+  setTimeout(()=>{
+    node.circle.classList.remove("active");
+    updateBackground();
+  }, release.value);
+  activeNotes.delete(note);
+}
+
+// --- Dynamic background ---
+function updateBackground(){
+  const count = activeNotes.size;
+  document.body.style.background = `linear-gradient(135deg, 
+    rgb(${30+count*10},${31+count*10},${47+count*10}), 
+    rgb(${46+count*5},${46+count*5},${79+count*5}))`;
+}
+</script>
+
+</body>
+</html>
